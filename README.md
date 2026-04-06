@@ -33,7 +33,7 @@ All integrations are **optional** — configure only what you need via environme
 
 | Integration | What it does | Required env vars |
 |---|---|---|
-| [Spotify](https://github.com/spotify) | Scheduled backup of liked songs, playlists, albums, artists, top tracks, recently played, podcasts. Streaming via Spotify Web Playback SDK requires **Spotify Premium**. | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` |
+| [Spotify](https://github.com/spotify) | Scheduled backup of metadata such as liked songs, playlists, albums, artists, top tracks, recently played, podcasts. Streaming via Spotify Web Playback SDK requires **Spotify Premium**. | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET` |
 | [Navidrome](https://github.com/navidrome/navidrome) | Browse and stream your self-hosted music library, cross-platform deduplication with Spotify | `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASSWORD` |
 | [Koito](https://github.com/gabehf/Koito) | Scrobble/listening history from Koito's PostgreSQL database (falls back to Spotify recently played if unavailable) | `KOITO_DSN` |
 | [MusicBrainz](https://github.com/metabrainz/musicbrainz-server) | Automatic genre/tag lookups for artists (free, no auth needed, runs daily) | — (always active) |
