@@ -47,6 +47,7 @@ cd vibeshelf
 
 # 2. Create your config
 cp .env.example .env
+cp compose.example.yaml compose.yaml
 # Edit .env — uncomment and fill in the integrations you want
 
 # 3. Run
