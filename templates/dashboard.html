@@ -73,7 +73,7 @@ body {
 
 /* LCD Display */
 #lcd {
-  flex: 0 1 320px; min-width: 180px; height: 36px;
+  flex: 0 1 320px; min-width: 180px; height: 36px; cursor: pointer;
   background: linear-gradient(to bottom, #E8DFCF, #D8CDB8);
   border-radius: 10px;
   border: 1px solid #A09880;
@@ -99,8 +99,9 @@ body {
 }
 #lcd-bar-fill { height: 100%; width: 0%; background: #7A9A5A; border-radius: 2px; transition: width 0.15s linear; }
 #nd-audio { display: none; }
-tr.now-playing td { color: #1DB954 !important; font-weight: bold; }
+tr.now-playing td { font-weight: bold; }
 .ctrl-btn.is-playing { color: #1DB954 !important; }
+.ctrl-btn.repeat-active { opacity: 1 !important; color: #2565C1 !important; }
 
 /* View buttons (segmented) */
 .view-seg {
@@ -602,6 +603,7 @@ tr.now-playing td { color: #1DB954 !important; font-weight: bold; }
       <button class="ctrl-btn" id="ctrl-prev" onclick="ctrlPrev()">&#9198;</button>
       <button class="ctrl-btn" id="ctrl-play" onclick="ctrlPlay()" style="font-size:16px">&#9654;</button>
       <button class="ctrl-btn" id="ctrl-next" onclick="ctrlNext()">&#9197;</button>
+      <button class="ctrl-btn" id="ctrl-repeat" onclick="ctrlRepeat()" title="Repeat: Off" style="font-size:10px;opacity:0.5">&#128257;</button>
     </div>
     <div id="lcd">
       <div id="lcd-title">ByeByeSpotify</div>
@@ -791,6 +793,14 @@ const Player = {
   _spTokenExp: 0,
   _spInstance: null,
   _spConnecting: null,
+  // Queue system
+  queue: [],
+  queueIdx: -1,
+  queueView: null,
+  queueBrowserFilter: {},
+  queueSearchQ: '',
+  queueSort: {},
+  repeat: 'off',      // 'off' | 'all' | 'one'
 };
 
 const _isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -871,7 +881,7 @@ function _trackPlatform(t) {
   return null;
 }
 
-async function playTrack(track, idx) {
+async function playTrack(track, idx, fromQueue) {
   if (!track) return;
   // Stop current playback
   if (Player.mode === 'navidrome' && Player.audio) { Player.audio.pause(); }
@@ -879,12 +889,27 @@ async function playTrack(track, idx) {
     try { await Player.spotifyPlayer.pause(); } catch(e) {}
   }
 
+  // Snapshot queue on user-initiated play (not from autoNext/ctrlNext)
+  if (!fromQueue) {
+    Player.queue = [...S.filtered];
+    Player.queueIdx = idx;
+    Player.queueView = S.view;
+    Player.queueBrowserFilter = { ...S.browserFilter };
+    Player.queueSearchQ = S.searchQ;
+    Player.queueSort = { ...S.sort };
+  }
+
   Player.currentTrack = track;
   Player.currentIdx = idx;
-  S.selectedIdx = idx;
+  if (!fromQueue) S.selectedIdx = idx;
 
-  selectRow(idx);
+  if (!fromQueue) selectRow(idx);
   _markNowPlaying();
+
+  // Always update LCD and mobile now-playing with current track
+  updateLCD(track);
+  updateArt(track);
+  updateMobileNowPlaying(track);
 
   const plat = _trackPlatform(track);
 
@@ -934,12 +959,22 @@ async function playTrack(track, idx) {
 }
 
 function _autoNext() {
-  const len = S.filtered.length;
+  const q = Player.queue;
+  const len = q.length;
   if (!len) return;
-  const next = Player.currentIdx + 1;
+
+  if (Player.repeat === 'one') {
+    playTrack(q[Player.queueIdx], Player.queueIdx, true);
+    return;
+  }
+
+  const next = Player.queueIdx + 1;
   if (next < len) {
-    playTrack(S.filtered[next], next);
-    scrollToSelected();
+    Player.queueIdx = next;
+    playTrack(q[next], next, true);
+  } else if (Player.repeat === 'all') {
+    Player.queueIdx = 0;
+    playTrack(q[0], 0, true);
   } else {
     Player.playing = false;
     _updatePlayBtn();
@@ -960,12 +995,48 @@ function _updatePlayBtn() {
   }
 }
 
+function ctrlRepeat() {
+  const modes = ['off', 'all', 'one'];
+  const cur = modes.indexOf(Player.repeat);
+  Player.repeat = modes[(cur + 1) % 3];
+  _updateRepeatBtn();
+}
+function _updateRepeatBtn() {
+  const btn = $('#ctrl-repeat');
+  if (!btn) return;
+  if (Player.repeat === 'off') {
+    btn.innerHTML = '&#128257;';
+    btn.title = 'Repeat: Off';
+    btn.classList.remove('repeat-active');
+    btn.style.opacity = '0.5';
+  } else if (Player.repeat === 'all') {
+    btn.innerHTML = '&#128257;';
+    btn.title = 'Repeat: All';
+    btn.classList.add('repeat-active');
+    btn.style.opacity = '';
+  } else {
+    btn.innerHTML = '&#128258;';
+    btn.title = 'Repeat: One';
+    btn.classList.add('repeat-active');
+    btn.style.opacity = '';
+  }
+}
+
+function _isQueueView() {
+  return Player.queueView != null && S.view === Player.queueView
+    && JSON.stringify(S.browserFilter) === JSON.stringify(Player.queueBrowserFilter)
+    && S.searchQ === Player.queueSearchQ;
+}
+
 function _markNowPlaying() {
   $$('#track-body tr.now-playing').forEach(tr => tr.classList.remove('now-playing'));
-  if (Player.currentIdx >= 0) {
-    const tr = document.querySelector('#track-body tr[data-idx="' + Player.currentIdx + '"]');
-    if (tr) tr.classList.add('now-playing');
-  }
+  if (!Player.currentTrack || !_isQueueView()) return;
+  const uri = Player.currentTrack.uri;
+  $$('#track-body tr[data-idx]').forEach(tr => {
+    const idx = parseInt(tr.dataset.idx);
+    const t = S.filtered[idx];
+    if (t && t.uri === uri) tr.classList.add('now-playing');
+  });
 }
 
 function _initAudioEvents() {
@@ -1003,6 +1074,44 @@ function _initAudioEvents() {
     }
   });
 }
+
+// Navigate back to the queue's original view and scroll to playing track
+async function _navToQueueView() {
+  if (!Player.currentTrack || !Player.queueView) return;
+  const target = document.querySelector('.sb-item[data-source="' + Player.queueView + '"]');
+  if (!target) return;
+
+  $$('.sb-item').forEach(i => i.classList.remove('active'));
+  target.classList.add('active');
+  S.view = Player.queueView;
+  S.browserFilter = { ...Player.queueBrowserFilter };
+  S.searchQ = Player.queueSearchQ;
+  S.sort = { ...Player.queueSort };
+  $('#search').value = S.searchQ;
+  $('#search-clear').style.display = S.searchQ ? 'block' : 'none';
+
+  populateBrowser();
+  for (const key of ['genre', 'artist', 'album']) {
+    if (S.browserFilter[key]) {
+      $$('#br-' + key + ' .browser-item').forEach(i => {
+        i.classList.toggle('active', i.dataset.val === S.browserFilter[key]);
+      });
+    }
+  }
+
+  await loadView();
+  const uri = Player.currentTrack.uri;
+  const idx = S.filtered.findIndex(t => t.uri === uri);
+  if (idx >= 0) { S.selectedIdx = idx; selectRow(idx); scrollToSelected(); }
+  $('#sidebar').classList.remove('open');
+  $('#sidebar-overlay').classList.remove('active');
+}
+
+// LCD click: navigate back to queue view
+$('#lcd').addEventListener('click', (e) => {
+  if (e.target.id === 'lcd-bar' || e.target.id === 'lcd-bar-fill') return;
+  _navToQueueView();
+});
 
 // Spotify state polling for progress bar
 setInterval(async () => {
@@ -1141,8 +1250,22 @@ function renderBrowserCol(id, items, active, key) {
 function browserSelect(el) {
   const key = el.dataset.key;
   const val = el.dataset.val;
+  // Only 1 filter active at a time: reset others when selecting a value
+  if (val) {
+    const keys = ['genre', 'artist', 'album'];
+    for (const k of keys) {
+      if (k !== key) {
+        S.browserFilter[k] = '';
+        // Reset visual state in that column
+        const col = $('#br-' + k);
+        if (col) col.querySelectorAll('.browser-item').forEach(i => {
+          i.classList.toggle('active', i.dataset.val === '');
+        });
+      }
+    }
+  }
   S.browserFilter[key] = val;
-  // Update active state in that column
+  // Update active state in this column
   el.parentElement.querySelectorAll('.browser-item').forEach(i => i.classList.remove('active'));
   el.classList.add('active');
   applyFiltersAndRender();
@@ -1168,7 +1291,8 @@ async function loadView() {
   const sv = $('#special-view');
   const browser = $('#browser');
   const mobTabs = $('#mob-browser-tabs');
-  updateMobileNowPlaying(null);
+  // Keep mobile now-playing visible if something is playing
+  if (!Player.playing) updateMobileNowPlaying(null);
 
   // Track-based views show table
   if (v === 'saved' || v === 'all' || v === 'navidrome' || v === 'recent' || v.startsWith('top_short') || v.startsWith('top_medium') || v.startsWith('top_long') || v.startsWith('playlist:')) {
@@ -1283,7 +1407,8 @@ function renderVisibleRows() {
   for (let i = start; i < end; i++) {
     const t = S.filtered[i];
     const tr = document.createElement('tr');
-    tr.className = (i % 2 === 0 ? 'row-even' : 'row-odd') + (i === S.selectedIdx ? ' selected' : '') + (i === Player.currentIdx ? ' now-playing' : '');
+    const isNowPlaying = _isQueueView() && Player.currentTrack && t.uri === Player.currentTrack.uri;
+    tr.className = (i % 2 === 0 ? 'row-even' : 'row-odd') + (i === S.selectedIdx ? ' selected' : '') + (isNowPlaying ? ' now-playing' : '');
     tr.dataset.idx = i;
     tr.onclick = function() { selectRow(parseInt(this.dataset.idx)); };
     tr.ondblclick = function() { const idx = parseInt(this.dataset.idx); const tk = S.filtered[idx]; if (tk) playTrack(tk, idx); };
@@ -1575,34 +1700,38 @@ async function ctrlPlay() {
       if (Player.spotifyPlayer && Player.spotifyReady) { Player.spotifyPlayer.resume(); return; }
       // SDK disconnected — reconnect and replay
       const sdkOk = await _ensureSpotifyConnected();
-      if (sdkOk && Player.currentTrack) { playTrack(Player.currentTrack, Player.currentIdx); }
+      if (sdkOk && Player.currentTrack) { playTrack(Player.currentTrack, Player.currentIdx, true); }
       return;
     }
   }
-  // Nothing playing yet: play selected or first
+  // Nothing playing yet: play selected or first (creates new queue)
   const idx = S.selectedIdx >= 0 ? S.selectedIdx : 0;
   const t = S.filtered[idx];
-  if (t) playTrack(t, idx);
+  if (t) playTrack(t, idx);  // fromQueue=false → snapshots queue
 }
 function ctrlNext() {
-  const len = S.filtered.length;
+  const q = Player.queue;
+  const len = q.length;
   if (!len) return;
-  const base = Player.currentIdx >= 0 ? Player.currentIdx : (S.selectedIdx >= 0 ? S.selectedIdx : -1);
-  const next = Math.min(base + 1, len - 1);
-  playTrack(S.filtered[next], next);
-  scrollToSelected();
+  const next = Math.min(Player.queueIdx + 1, len - 1);
+  if (next !== Player.queueIdx) {
+    Player.queueIdx = next;
+    playTrack(q[next], next, true);
+  }
 }
 function ctrlPrev() {
-  const len = S.filtered.length;
+  const q = Player.queue;
+  const len = q.length;
   if (!len) return;
   // If >3s into track, restart; otherwise previous
   if (Player.mode === 'navidrome' && Player.audio && Player.audio.currentTime > 3) {
     Player.audio.currentTime = 0; return;
   }
-  const base = Player.currentIdx >= 0 ? Player.currentIdx : (S.selectedIdx >= 0 ? S.selectedIdx : 1);
-  const prev = Math.max(base - 1, 0);
-  playTrack(S.filtered[prev], prev);
-  scrollToSelected();
+  const prev = Math.max(Player.queueIdx - 1, 0);
+  if (prev !== Player.queueIdx) {
+    Player.queueIdx = prev;
+    playTrack(q[prev], prev, true);
+  }
 }
 
 // ── Keyboard ──
@@ -1673,7 +1802,7 @@ function updateMobileNowPlaying(t) {
   }
 }
 function mnpTap(e) {
-  ctrlPlay();
+  _navToQueueView();
 }
 
 // ── Resize Handles ──
