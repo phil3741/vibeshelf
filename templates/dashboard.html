@@ -628,12 +628,12 @@ tr.now-playing td { color: #1DB954 !important; font-weight: bold; }
       <div id="sidebar-resize"></div>
       <div id="sidebar-list">
         <div class="sb-section">Library</div>
-        <div class="sb-item active" data-source="all" onclick="navTo(this)">
+        <div class="sb-item" data-source="all" onclick="navTo(this)" id="sb-all" style="display:none">
           <span class="sb-icon" style="color:#2ECC71">&#9836;</span>
           <span class="sb-label">All Music</span>
           <span class="sb-count" id="sb-all-count"></span>
         </div>
-        <div class="sb-item" data-source="saved" onclick="navTo(this)">
+        <div class="sb-item" data-source="saved" onclick="navTo(this)" id="sb-saved" style="display:none">
           <span class="sb-icon" style="color:#1DB954">&#9835;</span>
           <span class="sb-label">Spotify</span>
           <span class="sb-count" id="sb-music-count"></span>
@@ -643,28 +643,28 @@ tr.now-playing td { color: #1DB954 !important; font-weight: bold; }
           <span class="sb-label">Navidrome</span>
           <span class="sb-count" id="sb-navidrome-count"></span>
         </div>
-        <div class="sb-item" data-source="recent" onclick="navTo(this)">
+        <div class="sb-item" data-source="recent" onclick="navTo(this)" id="sb-recent" style="display:none">
           <span class="sb-icon" style="color:#8A8A8A">&#9202;</span>
           <span class="sb-label">Listening History</span>
           <span class="sb-count" id="sb-recent-count"></span>
         </div>
-        <div class="sb-item" data-source="top_short_term" onclick="navTo(this)">
+        <div class="sb-item" data-source="top_short_term" onclick="navTo(this)" id="sb-top-tracks" style="display:none">
           <span class="sb-icon" style="color:#DAA520">&#9733;</span>
           <span class="sb-label">Top Tracks</span>
         </div>
-        <div class="sb-item" data-source="top_artists" onclick="navTo(this)">
+        <div class="sb-item" data-source="top_artists" onclick="navTo(this)" id="sb-top-artists" style="display:none">
           <span class="sb-icon" style="color:#9B59B6">&#9829;</span>
           <span class="sb-label">Top Artists</span>
         </div>
-        <div class="sb-item" data-source="podcasts" onclick="navTo(this)">
+        <div class="sb-item" data-source="podcasts" onclick="navTo(this)" id="sb-podcasts" style="display:none">
           <span class="sb-icon" style="color:#8E44AD">&#127897;</span>
           <span class="sb-label">Podcasts</span>
         </div>
-        <div class="sb-item" data-source="status" onclick="navTo(this)">
+        <div class="sb-item" data-source="status" onclick="navTo(this)" id="sb-status" style="display:none">
           <span class="sb-icon" style="color:#7F8C8D">&#9881;</span>
           <span class="sb-label">Backup Status</span>
         </div>
-        <div class="sb-section" style="margin-top:6px">Playlists</div>
+        <div class="sb-section" style="margin-top:6px;display:none" id="sb-playlists-section">Playlists</div>
         <div id="sb-playlists"></div>
       </div>
       <div id="sidebar-art"><div class="placeholder">&#9835;</div></div>
@@ -1065,16 +1065,33 @@ function artUrl(url) {
 // ── Sidebar ──
 async function initSidebar() {
   S.sidebar = await api('/api/sidebar');
+  const intg = S.sidebar.integrations || {};
+  const show = sel => { const el = $(sel); if (el) el.style.display = ''; };
+
+  // Show sidebar items based on configured integrations
+  if (intg.spotify || intg.navidrome) show('#sb-all');
+  if (intg.spotify) {
+    show('#sb-saved'); show('#sb-top-tracks'); show('#sb-top-artists');
+    show('#sb-podcasts'); show('#sb-status'); show('#sb-playlists-section');
+  }
+  if (intg.koito || intg.spotify) show('#sb-recent');
+  // Navidrome: show if count > 0 (may have tracks even without live connection)
+  const ndCount = S.sidebar.navidrome_count || 0;
+  if (ndCount > 0) show('#sb-navidrome');
+
+  // Populate counts
   $('#sb-music-count').textContent = S.sidebar.saved_count || '';
   $('#sb-recent-count').textContent = S.sidebar.recent_count || '';
-  // Navidrome
-  const ndCount = S.sidebar.navidrome_count || 0;
-  if (ndCount > 0) {
-    const ndEl = $('#sb-navidrome');
-    if (ndEl) { ndEl.style.display = ''; }
-    $('#sb-navidrome-count').textContent = ndCount;
-  }
+  $('#sb-navidrome-count').textContent = ndCount || '';
   $('#sb-all-count').textContent = S.sidebar.all_count || ((S.sidebar.saved_count || 0) + ndCount);
+
+  // Set default active view to first visible item
+  const firstVisible = [...document.querySelectorAll('#sidebar-list .sb-item')].find(el => el.style.display !== 'none');
+  if (firstVisible) {
+    firstVisible.classList.add('active');
+    S.view = firstVisible.dataset.source;
+  }
+
   // Playlists
   const plC = $('#sb-playlists');
   plC.innerHTML = S.sidebar.playlists.map(p =>
@@ -1843,14 +1860,12 @@ async function init() {
     const cols = [...$$('#browser .browser-col')];
     if (savedBCW.length === cols.length) cols.forEach((c, i) => { c.style.flex = '0 0 ' + savedBCW[i] + 'px'; });
   }
-  // Apply saved view
-  if (savedView !== 'all') {
-    const target = document.querySelector('.sb-item[data-source="' + savedView + '"]');
-    if (target) {
-      $$('.sb-item').forEach(i => i.classList.remove('active'));
-      target.classList.add('active');
-      S.view = savedView;
-    }
+  // Apply saved view (only if its sidebar item is visible)
+  const savedTarget = document.querySelector('.sb-item[data-source="' + savedView + '"]');
+  if (savedTarget && savedTarget.style.display !== 'none') {
+    $$('.sb-item').forEach(i => i.classList.remove('active'));
+    savedTarget.classList.add('active');
+    S.view = savedView;
   }
   S.sort = savedSort;
   S.browserFilter = savedBF;

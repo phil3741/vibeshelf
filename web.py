@@ -405,11 +405,18 @@ def _api_library_db(source: str, artist: str, album: str, genre: str, q: str):
 
     if source == "all":
         # Dedup: 1) group by URI (saved+playlist dupes), 2) skip navidrome dupes (platform='both')
-        sql = f"""SELECT {_COLS} FROM tracks WHERE source IN ('saved', 'playlist', 'navidrome')
-            AND NOT (source = 'navidrome' AND platform = 'both')
+        all_sources = []
+        if _SPOTIFY_CONFIGURED:
+            all_sources += ["'saved'", "'playlist'"]
+        if _NAVIDROME_CONFIGURED:
+            all_sources.append("'navidrome'")
+        src_in = ", ".join(all_sources) if all_sources else "'__none__'"
+        dedup_clause = "AND NOT (source = 'navidrome' AND platform = 'both')" if _SPOTIFY_CONFIGURED and _NAVIDROME_CONFIGURED else ""
+        sql = f"""SELECT {_COLS} FROM tracks WHERE source IN ({src_in})
+            {dedup_clause}
             AND id IN (
-                SELECT MIN(id) FROM tracks WHERE source IN ('saved', 'playlist', 'navidrome')
-                AND NOT (source = 'navidrome' AND platform = 'both')
+                SELECT MIN(id) FROM tracks WHERE source IN ({src_in})
+                {dedup_clause}
                 GROUP BY uri
             )"""
         base_params = []
@@ -470,6 +477,13 @@ def _api_library_db(source: str, artist: str, album: str, genre: str, q: str):
         db.close()
         return _api_library_json(source, artist, album, genre, q)
     db.close()
+
+    # Normalize platform field based on active integrations
+    if not _SPOTIFY_CONFIGURED or not _NAVIDROME_CONFIGURED:
+        for t in tracks:
+            if t.get("platform") == "both":
+                t["platform"] = "navidrome" if _NAVIDROME_CONFIGURED else "spotify"
+
     payload = json.dumps({"tracks": tracks, "total": len(tracks)}, ensure_ascii=False).encode()
     _cache_set(cache_key, payload)
     return Response(content=payload, media_type="application/json",
@@ -586,16 +600,38 @@ def _api_sidebar_db():
     profile = _read_json("profile.json")
     user = profile.get("display_name", "Unknown") if profile else "Unknown"
 
+    recent_count = _koito_count() if _KOITO_CONFIGURED else 0
+    if recent_count == 0 and _SPOTIFY_CONFIGURED:
+        rp = _read_json("recently_played.json")
+        recent_count = len(rp) if isinstance(rp, list) else 0
+
+    saved_count = cache.get("saved_count", 0) if _SPOTIFY_CONFIGURED else 0
+    navidrome_count = cache.get("navidrome_count", 0) if _NAVIDROME_CONFIGURED else 0
+    # Recalculate all_count based on active integrations
+    if _SPOTIFY_CONFIGURED and _NAVIDROME_CONFIGURED:
+        all_count = cache.get("all_count", 0)
+    elif _SPOTIFY_CONFIGURED:
+        all_count = saved_count
+    elif _NAVIDROME_CONFIGURED:
+        all_count = navidrome_count
+    else:
+        all_count = 0
+
     result = {
         "user": user,
-        "saved_count": cache.get("saved_count", 0),
-        "recent_count": _koito_count(),
-        "navidrome_count": cache.get("navidrome_count", 0),
-        "all_count": cache.get("all_count", 0),
-        "playlists": cache.get("playlists", []),
+        "saved_count": saved_count,
+        "recent_count": recent_count,
+        "navidrome_count": navidrome_count,
+        "all_count": all_count,
+        "playlists": cache.get("playlists", []) if _SPOTIFY_CONFIGURED else [],
         "artists": cache.get("artists", []),
         "albums": cache.get("albums", []),
         "genres": cache.get("genres", []),
+        "integrations": {
+            "spotify": _SPOTIFY_CONFIGURED,
+            "navidrome": _NAVIDROME_CONFIGURED,
+            "koito": _KOITO_CONFIGURED,
+        },
     }
     payload = json.dumps(result, ensure_ascii=False).encode()
     _cache_set("sidebar", payload)
@@ -649,7 +685,10 @@ def _api_sidebar_json():
         if t.get("genre"):
             genres_set.add(t["genre"])
 
-    recent_count = _koito_count()
+    recent_count = _koito_count() if _KOITO_CONFIGURED else 0
+    if recent_count == 0 and _SPOTIFY_CONFIGURED:
+        rp = _read_json("recently_played.json")
+        recent_count = len(rp) if isinstance(rp, list) else 0
 
     # Compute deduped all-music count
     all_count = saved_count + navidrome_count
@@ -675,6 +714,11 @@ def _api_sidebar_json():
         "artists": sorted(artists_set),
         "albums": sorted(albums_set),
         "genres": sorted(genres_set),
+        "integrations": {
+            "spotify": _SPOTIFY_CONFIGURED,
+            "navidrome": _NAVIDROME_CONFIGURED,
+            "koito": _KOITO_CONFIGURED,
+        },
     }
 
 
@@ -870,17 +914,30 @@ def icon():
 
 @app.get("/sw.js")
 def service_worker():
-    sw = '''const CACHE='bbs-v1';
+    # Version the cache based on dashboard content so deploys auto-invalidate
+    html_hash = hashlib.md5(_get_dashboard_html().encode()).hexdigest()[:8]
+    sw = f'''const CACHE='bbs-{html_hash}';
 self.addEventListener('install',e=>self.skipWaiting());
-self.addEventListener('activate',e=>e.waitUntil(clients.claim()));
-self.addEventListener('fetch',e=>{
+self.addEventListener('activate',e=>e.waitUntil(
+  caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>clients.claim())
+));
+self.addEventListener('fetch',e=>{{
   if(e.request.url.includes('/api/'))return;
-  e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(resp=>{
-    if(resp.ok&&resp.type==='basic'){const c=resp.clone();caches.open(CACHE).then(cache=>cache.put(e.request,c));}
+  const nav=e.request.mode==='navigate';
+  if(nav){{
+    e.respondWith(fetch(e.request).then(resp=>{{
+      if(resp.ok){{const c=resp.clone();caches.open(CACHE).then(cache=>cache.put(e.request,c));}}
+      return resp;
+    }}).catch(()=>caches.match(e.request)));
+    return;
+  }}
+  e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(resp=>{{
+    if(resp.ok&&resp.type==='basic'){{const c=resp.clone();caches.open(CACHE).then(cache=>cache.put(e.request,c));}}
     return resp;
-  })));
-});'''
-    return HTMLResponse(content=sw, media_type="application/javascript")
+  }})));
+}});'''
+    return Response(content=sw, media_type="application/javascript",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/", response_class=HTMLResponse)
