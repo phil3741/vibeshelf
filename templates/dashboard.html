@@ -69,6 +69,14 @@ body {
   background: none; border: none; cursor: default;
   color: #4A4A4A; font-size: 14px; line-height: 1;
   padding: 2px 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 3px; min-width: 22px; height: 22px;
+}
+.ctrl-btn:active { transform: translateY(1px); }
+.ctrl-btn svg { width: 12px; height: 12px; }
+#ctrl-play svg { width: 14px; height: 14px; }
+.ctrl-sep {
+  width: 1px; height: 14px; background: #909090; margin: 0 2px; opacity: 0.5;
 }
 
 /* LCD Display */
@@ -102,6 +110,7 @@ body {
 tr.now-playing td { font-weight: bold; }
 .ctrl-btn.is-playing { color: #1DB954 !important; }
 .ctrl-btn.repeat-active { opacity: 1 !important; color: #2565C1 !important; }
+.ctrl-btn.shuffle-active { opacity: 1 !important; color: #2565C1 !important; }
 
 /* View buttons (segmented) */
 .view-seg {
@@ -600,10 +609,13 @@ tr.now-playing td { font-weight: bold; }
       <div class="traffic-light tl-green"></div>
     </div>
     <div class="controls-tray">
-      <button class="ctrl-btn" id="ctrl-prev" onclick="ctrlPrev()">&#9198;</button>
-      <button class="ctrl-btn" id="ctrl-play" onclick="ctrlPlay()" style="font-size:16px">&#9654;</button>
-      <button class="ctrl-btn" id="ctrl-next" onclick="ctrlNext()">&#9197;</button>
-      <button class="ctrl-btn" id="ctrl-repeat" onclick="ctrlRepeat()" title="Repeat: Off" style="font-size:10px;opacity:0.5">&#128257;</button>
+      <button class="ctrl-btn" id="ctrl-shuffle" onclick="ctrlShuffle()" title="Shuffle: Off" style="opacity:0.5"></button>
+      <span class="ctrl-sep"></span>
+      <button class="ctrl-btn" id="ctrl-prev" onclick="ctrlPrev()"></button>
+      <button class="ctrl-btn" id="ctrl-play" onclick="ctrlPlay()"></button>
+      <button class="ctrl-btn" id="ctrl-next" onclick="ctrlNext()"></button>
+      <span class="ctrl-sep"></span>
+      <button class="ctrl-btn" id="ctrl-repeat" onclick="ctrlRepeat()" title="Repeat: Off" style="opacity:0.5"></button>
     </div>
     <div id="lcd">
       <div id="lcd-title">ByeByeSpotify</div>
@@ -734,9 +746,9 @@ tr.now-playing td { font-weight: bold; }
       <div id="mnp-detail"></div>
     </div>
     <div id="mnp-controls">
-      <button onclick="event.stopPropagation();ctrlPrev()">&#9198;</button>
-      <button onclick="event.stopPropagation();ctrlPlay()">&#9654;</button>
-      <button onclick="event.stopPropagation();ctrlNext()">&#9197;</button>
+      <button id="mnp-prev" onclick="event.stopPropagation();ctrlPrev()"></button>
+      <button id="mnp-play" onclick="event.stopPropagation();ctrlPlay()"></button>
+      <button id="mnp-next" onclick="event.stopPropagation();ctrlNext()"></button>
     </div>
   </div>
 
@@ -801,9 +813,22 @@ const Player = {
   queueSearchQ: '',
   queueSort: {},
   repeat: 'off',      // 'off' | 'all' | 'one'
+  shuffle: false,
+  _originalQueue: [],
 };
 
 const _isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+// ── iTunes 7-style SVG Icons ──
+const ICONS = {
+  prev: '<svg viewBox="0 0 14 14" fill="currentColor"><rect x="1" y="3" width="2" height="8" rx="0.5"/><polygon points="12,3 5,7 12,11"/><polygon points="8,3 1,7 8,11" opacity="0" /></svg>',
+  play: '<svg viewBox="0 0 14 14" fill="currentColor"><polygon points="3,1.5 12.5,7 3,12.5"/></svg>',
+  pause: '<svg viewBox="0 0 14 14" fill="currentColor"><rect x="2.5" y="2" width="3" height="10" rx="0.8"/><rect x="8.5" y="2" width="3" height="10" rx="0.8"/></svg>',
+  next: '<svg viewBox="0 0 14 14" fill="currentColor"><polygon points="2,3 9,7 2,11"/><rect x="11" y="3" width="2" height="8" rx="0.5"/></svg>',
+  shuffle: '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1 10h2l3-3 3 3h2"/><path d="M1 4h2l3 3"/><path d="M9 4h2"/><polyline points="10,2 12,4 10,6"/><polyline points="10,8 12,10 10,12"/></svg>',
+  repeat: '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8.5V6a2 2 0 0 1 2-2h7"/><polyline points="9,2 11,4 9,6"/><path d="M12.5 5.5V8a2 2 0 0 1-2 2h-7"/><polyline points="5,12 3,10 5,8"/></svg>',
+  repeatOne: '<svg viewBox="0 0 14 14" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8.5V6a2 2 0 0 1 2-2h7" fill="none"/><polyline points="9,2 11,4 9,6" fill="none"/><path d="M12.5 5.5V8a2 2 0 0 1-2 2h-7" fill="none"/><polyline points="5,12 3,10 5,8" fill="none"/><text x="7" y="9" text-anchor="middle" font-size="6" font-weight="bold" stroke="none" fill="currentColor">1</text></svg>',
+};
 
 async function _getSpotifyToken() {
   if (Player._spTokenCache && Date.now() < Player._spTokenExp) return Player._spTokenCache;
@@ -897,6 +922,10 @@ async function playTrack(track, idx, fromQueue) {
     Player.queueBrowserFilter = { ...S.browserFilter };
     Player.queueSearchQ = S.searchQ;
     Player.queueSort = { ...S.sort };
+    if (Player.shuffle) {
+      Player._originalQueue = [...Player.queue];
+      _shuffleRemaining();
+    }
   }
 
   Player.currentTrack = track;
@@ -983,15 +1012,15 @@ function _autoNext() {
 
 function _updatePlayBtn() {
   const btn = $('#ctrl-play');
-  const mnpBtn = $('#mnp-controls')?.children[1];
+  const mnpBtn = $('#mnp-play');
   if (Player.playing) {
-    btn.innerHTML = '&#9646;&#9646;';
+    btn.innerHTML = ICONS.pause;
     btn.classList.add('is-playing');
-    if (mnpBtn) mnpBtn.innerHTML = '&#9646;&#9646;';
+    if (mnpBtn) mnpBtn.innerHTML = ICONS.pause;
   } else {
-    btn.innerHTML = '&#9654;';
+    btn.innerHTML = ICONS.play;
     btn.classList.remove('is-playing');
-    if (mnpBtn) mnpBtn.innerHTML = '&#9654;';
+    if (mnpBtn) mnpBtn.innerHTML = ICONS.play;
   }
 }
 
@@ -1005,21 +1034,75 @@ function _updateRepeatBtn() {
   const btn = $('#ctrl-repeat');
   if (!btn) return;
   if (Player.repeat === 'off') {
-    btn.innerHTML = '&#128257;';
+    btn.innerHTML = ICONS.repeat;
     btn.title = 'Repeat: Off';
     btn.classList.remove('repeat-active');
     btn.style.opacity = '0.5';
   } else if (Player.repeat === 'all') {
-    btn.innerHTML = '&#128257;';
+    btn.innerHTML = ICONS.repeat;
     btn.title = 'Repeat: All';
     btn.classList.add('repeat-active');
     btn.style.opacity = '';
   } else {
-    btn.innerHTML = '&#128258;';
+    btn.innerHTML = ICONS.repeatOne;
     btn.title = 'Repeat: One';
     btn.classList.add('repeat-active');
     btn.style.opacity = '';
   }
+}
+
+// ── Shuffle ──
+function ctrlShuffle() {
+  Player.shuffle = !Player.shuffle;
+  if (Player.shuffle && Player.queue.length > 0) {
+    Player._originalQueue = [...Player.queue];
+    _shuffleRemaining();
+  } else if (!Player.shuffle && Player._originalQueue.length > 0) {
+    const cur = Player.queue[Player.queueIdx];
+    Player.queue = [...Player._originalQueue];
+    if (cur) {
+      const newIdx = Player.queue.findIndex(t => t.id === cur.id);
+      if (newIdx >= 0) Player.queueIdx = newIdx;
+    }
+    Player._originalQueue = [];
+  }
+  _updateShuffleBtn();
+}
+
+function _shuffleRemaining() {
+  const start = Player.queueIdx + 1;
+  const q = Player.queue;
+  for (let i = q.length - 1; i > start; i--) {
+    const j = start + Math.floor(Math.random() * (i - start + 1));
+    [q[i], q[j]] = [q[j], q[i]];
+  }
+}
+
+function _updateShuffleBtn() {
+  const btn = $('#ctrl-shuffle');
+  if (!btn) return;
+  if (Player.shuffle) {
+    btn.classList.add('shuffle-active');
+    btn.style.opacity = '';
+    btn.title = 'Shuffle: On';
+  } else {
+    btn.classList.remove('shuffle-active');
+    btn.style.opacity = '0.5';
+    btn.title = 'Shuffle: Off';
+  }
+}
+
+function _initControlIcons() {
+  const s = id => $(id);
+  s('#ctrl-prev').innerHTML = ICONS.prev;
+  s('#ctrl-play').innerHTML = ICONS.play;
+  s('#ctrl-next').innerHTML = ICONS.next;
+  s('#ctrl-shuffle').innerHTML = ICONS.shuffle;
+  s('#ctrl-repeat').innerHTML = ICONS.repeat;
+  // Mobile
+  const mp = s('#mnp-prev'); if (mp) mp.innerHTML = ICONS.prev;
+  const mpl = s('#mnp-play'); if (mpl) mpl.innerHTML = ICONS.play;
+  const mn = s('#mnp-next'); if (mn) mn.innerHTML = ICONS.next;
 }
 
 function _isQueueView() {
@@ -1986,6 +2069,7 @@ function setupMobileTable() {
 async function init() {
   Player.audio = $('#nd-audio');
   _initAudioEvents();
+  _initControlIcons();
   setupMobileTable();
   await initSidebar();
   // Restore persisted state
