@@ -1219,9 +1219,22 @@ async function initSidebar() {
 function populateBrowser() {
   if (!S.sidebar) return;
   const gf = S.browserFilter;
-  let genres = S.sidebar.genres || [];
-  let artists = S.sidebar.artists || [];
-  let albums = S.sidebar.albums || [];
+  let genres, artists, albums;
+  if (S.view === 'all') {
+    genres = S.sidebar.genres || [];
+    artists = S.sidebar.artists || [];
+    albums = S.sidebar.albums || [];
+  } else {
+    const genreSet = new Set(), artistSet = new Set(), albumSet = new Set();
+    for (const t of S.tracks) {
+      if (t.genre) genreSet.add(t.genre);
+      if (t.artist) artistSet.add(normArtist(t.artist));
+      if (t.album) albumSet.add(t.album);
+    }
+    genres = [...genreSet].sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+    artists = [...artistSet].sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+    albums = [...albumSet].sort((a, b) => a.localeCompare(b, undefined, {sensitivity: 'base'}));
+  }
 
   // Filter browser lists by search query
   if (S.searchQ) {
