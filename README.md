@@ -8,9 +8,9 @@ A purely hand-prompted and heavily modified extension of [ByeByeSpotify](https:/
 
 Now what if we made this a regular backup...
 
-and what if we made a nice web-UI to visualize and browse through your music..
+and what if we made an iTunes 2007 Replica Web-UI to visualize and browse through your music..
 
-...why not integrate you existing Navidrome instance while were at it? (with deduplication of similar songs from both sources)
+...why not integrate your existing Navidrome instance while were at it? (with deduplication of similar songs from both sources)
 
 ...and add MusicBrainz integration to include proper genre and year metadata?
 
