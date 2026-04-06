@@ -1,0 +1,13 @@
+services:
+  vibeshelf:
+    build: .
+    container_name: vibeshelf
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./exports:/app/exports
+      - ./cache:/app/.cache
+      # Optional: mount a Gotify token file for push notifications
+      # - /path/to/gotify-token:/run/secrets/gotify:ro
+    restart: unless-stopped

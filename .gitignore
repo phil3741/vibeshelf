@@ -27,9 +27,13 @@ wheels/
 .installed.cfg
 *.egg
 
-# Spotify cache
+# Spotify / auth cache
 .cache
 .cache-*
+cache/
+
+# Docker (personal compose with domains/labels)
+compose.yaml
 
 # Export data (optional - comment out if you want to commit exports)
 exports/
