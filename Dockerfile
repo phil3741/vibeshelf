@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY spotify_exporter.py auth.py web.py ./
 COPY shared/ ./shared/
 COPY templates/ ./templates/
+COPY static/ ./static/
 
 EXPOSE 8080
 
