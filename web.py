@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.middleware.gzip import GZipMiddleware
 from shared.db import get_db as _shared_get_db
 from shared.navidrome import nd_config_from_env, nd_cover_url, nd_stream_url, nd_scrobble_url
@@ -62,6 +62,7 @@ def _db_available() -> bool:
 _KOITO_QUERY = """
 SELECT
   l.listened_at,
+  l.client,
   ta.alias AS track_name,
   t.duration,
   ra.alias AS album_name,
@@ -75,7 +76,7 @@ LEFT JOIN artist_tracks at2 ON at2.track_id = t.id
 LEFT JOIN artists ar ON ar.id = at2.artist_id
 LEFT JOIN artist_aliases aa ON aa.artist_id = ar.id AND aa.is_primary = true
 WHERE l.user_id = %s
-GROUP BY l.listened_at, t.id, ta.alias, t.duration, ra.alias
+GROUP BY l.listened_at, l.client, t.id, ta.alias, t.duration, ra.alias
 ORDER BY l.listened_at DESC
 LIMIT %s
 """
@@ -94,21 +95,92 @@ def _fetch_koito_listens(limit: int = 500) -> list[dict]:
         conn.close()
     except Exception:
         return []
+    # Build lookup indexes from the local library to resolve playable URIs.
+    # Koito's artist string may differ in order/separators from Spotify/Navidrome,
+    # so we keep both an exact (name, artist) index and a name-only fallback.
+    exact: dict[tuple[str, str], list[tuple]] = {}
+    by_name: dict[str, list[tuple]] = {}
+    try:
+        if _db_available():
+            lconn = _get_db()
+            try:
+                lcur = lconn.execute(
+                    "SELECT name_lower, artist_lower, uri, image, album_id, platform FROM tracks"
+                )
+                for row in lcur:
+                    rec = tuple(row[2:])
+                    exact.setdefault((row[0], row[1]), []).append(rec)
+                    by_name.setdefault(row[0], []).append((row[1], rec))
+            finally:
+                lconn.close()
+    except Exception:
+        exact = {}
+        by_name = {}
+
+    def _pick(matches, client):
+        if client == "navidrome":
+            for m in matches:
+                if m[3] == "navidrome":
+                    return m
+        else:
+            for m in matches:
+                if m[3] == "spotify":
+                    return m
+        return matches[0]
+
+    def _resolve(name: str, artist: str, client: str | None):
+        nl = name.lower()
+        al = artist.lower()
+        m = exact.get((nl, al))
+        if m:
+            return _pick(m, client)
+        # Name-only fallback: prefer a candidate whose first artist token
+        # matches one of koito's artists (case-insensitive), else any.
+        candidates = by_name.get(nl)
+        if not candidates:
+            return None
+        koito_artists = {a.strip().lower() for a in artist.split(",") if a.strip()}
+        scored = []
+        for cand_artist, rec in candidates:
+            cand_first = cand_artist.split(",")[0].strip()
+            score = 1 if cand_first in koito_artists or cand_artist in koito_artists else 0
+            scored.append((score, rec))
+        scored.sort(key=lambda x: -x[0])
+        best_score = scored[0][0]
+        # Only accept name-only matches when at least one artist token aligns,
+        # to avoid playing a same-titled but unrelated track.
+        if best_score == 0:
+            return None
+        filtered = [rec for s, rec in scored if s == best_score]
+        return _pick(filtered, client)
+
     tracks = []
     for r in rows:
+        name = r["track_name"] or ""
+        artist = r["artists"] or ""
+        client = r["client"]
+        match = _resolve(name, artist, client)
+        if match is not None:
+            uri, image, album_id, platform = match
+        else:
+            uri = f"koito:{int(r['listened_at'].timestamp())}"
+            image = ""
+            album_id = ""
+            platform = "navidrome" if client == "navidrome" else "spotify"
         tracks.append({
-            "name": r["track_name"] or "",
-            "artist": r["artists"] or "",
+            "name": name,
+            "artist": artist,
             "album": r["album_name"] or "",
             "duration_ms": (r["duration"] or 0) * 1000,
             "year": "",
             "genre": "",
-            "uri": f"koito:{int(r['listened_at'].timestamp())}",
-            "image": "",
+            "uri": uri,
+            "image": image,
             "source": "recent",
             "source_name": "Listening History",
             "added_at": r["listened_at"].isoformat(),
-            "platform": "koito",
+            "platform": platform,
+            "album_id": album_id,
         })
     _cache_set("koito_listens", json.dumps(tracks).encode())
     return tracks
@@ -166,7 +238,7 @@ def _build_genre_map(export_dir: Path) -> dict:
 def _extract_track(item: dict, source: str, source_name: str, genre_map: dict) -> dict | None:
     return _normalize_track(item, source, source_name, genre_map)
 
-app = FastAPI(title="ByeByeSpotify")
+app = FastAPI(title="VibeShelf")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
@@ -890,16 +962,21 @@ def api_spotify_token():
 
 @app.get("/manifest.json")
 def manifest():
-    return JSONResponse({
-        "name": "ByeByeSpotify",
-        "short_name": "BBS",
+    return JSONResponse(media_type="application/manifest+json", content={
+        "name": "VibeShelf",
+        "short_name": "VibeShelf",
+        "description": "Your music library, shelved.",
         "start_url": "/",
+        "scope": "/",
         "display": "standalone",
-        "background_color": "#808080",
+        "orientation": "any",
+        "background_color": "#202020",
         "theme_color": "#A8A8A8",
         "icons": [
-            {"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml"}
-        ]
+            {"src": "/icon.svg",     "sizes": "any",     "type": "image/svg+xml", "purpose": "any"},
+            {"src": "/icon-192.png", "sizes": "192x192", "type": "image/png",     "purpose": "any maskable"},
+            {"src": "/icon-512.png", "sizes": "512x512", "type": "image/png",     "purpose": "any maskable"},
+        ],
     })
 
 
@@ -912,11 +989,21 @@ def icon():
     return HTMLResponse(content=svg, media_type="image/svg+xml")
 
 
+@app.get("/icon-192.png")
+def icon_192():
+    return FileResponse(Path(__file__).parent / "static" / "icon-192.png", media_type="image/png")
+
+
+@app.get("/icon-512.png")
+def icon_512():
+    return FileResponse(Path(__file__).parent / "static" / "icon-512.png", media_type="image/png")
+
+
 @app.get("/sw.js")
 def service_worker():
     # Version the cache based on dashboard content so deploys auto-invalidate
     html_hash = hashlib.md5(_get_dashboard_html().encode()).hexdigest()[:8]
-    sw = f'''const CACHE='bbs-{html_hash}';
+    sw = f'''const CACHE='vs-{html_hash}';
 self.addEventListener('install',e=>self.skipWaiting());
 self.addEventListener('activate',e=>e.waitUntil(
   caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>clients.claim())

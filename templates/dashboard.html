@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#A8A8A8">
 <link rel="manifest" href="/manifest.json">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<title>ByeByeSpotify</title>
+<title>VibeShelf</title>
 <style>
 /* ── iTunes 2008 Reset & Base ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -618,7 +618,7 @@ tr.now-playing td { font-weight: bold; }
       <button class="ctrl-btn" id="ctrl-repeat" onclick="ctrlRepeat()" title="Repeat: Off" style="opacity:0.5"></button>
     </div>
     <div id="lcd">
-      <div id="lcd-title">ByeByeSpotify</div>
+      <div id="lcd-title">VibeShelf</div>
       <div id="lcd-subtitle">Loading...</div>
       <div id="lcd-bar"><div id="lcd-bar-fill"></div></div>
     </div>
@@ -861,7 +861,7 @@ async function _ensureSpotifyConnected() {
     if (!token) { Player._spConnecting = null; resolve(false); return; }
 
     const p = new Spotify.Player({
-      name: 'ByeByeSpotify',
+      name: 'VibeShelf',
       getOAuthToken: async cb => { cb(await _getSpotifyToken()); },
       volume: 0.8,
     });
@@ -938,9 +938,16 @@ async function playTrack(track, idx, fromQueue) {
   // Always update LCD and mobile now-playing with current track
   updateLCD(track);
   updateArt(track);
+  updateMediaSession(track);
   updateMobileNowPlaying(track);
 
   const plat = _trackPlatform(track);
+
+  if (!plat) {
+    console.warn('No playable URI for track', track);
+    $('#lcd-title').textContent = 'Not playable';
+    return;
+  }
 
   if (plat === 'navidrome') {
     Player.mode = 'navidrome';
@@ -967,14 +974,21 @@ async function playTrack(track, idx, fromQueue) {
         const token = await _getSpotifyToken();
         if (token) {
           try {
-            await fetch('https://api.spotify.com/v1/me/player/play?device_id=' + Player.deviceId, {
+            const resp = await fetch('https://api.spotify.com/v1/me/player/play?device_id=' + Player.deviceId, {
               method: 'PUT',
               headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
               body: JSON.stringify({ uris: [track.uri] }),
             });
-            Player.playing = true;
-            _updatePlayBtn();
+            if (!resp.ok) {
+              const body = await resp.text();
+              console.error('Spotify play failed', resp.status, body, 'uri=', track.uri);
+              $('#lcd-title').textContent = 'Playback failed (' + resp.status + ')';
+            } else {
+              Player.playing = true;
+              _updatePlayBtn();
+            }
           } catch(e) {
+            console.error('Spotify play exception', e, 'uri=', track.uri);
             $('#lcd-title').textContent = 'Playback failed';
           }
         }
@@ -1011,6 +1025,9 @@ function _autoNext() {
 }
 
 function _updatePlayBtn() {
+  if ('mediaSession' in navigator) {
+    try { navigator.mediaSession.playbackState = Player.playing ? 'playing' : 'paused'; } catch(e) {}
+  }
   const btn = $('#ctrl-play');
   const mnpBtn = $('#mnp-play');
   if (Player.playing) {
@@ -1114,11 +1131,12 @@ function _isQueueView() {
 function _markNowPlaying() {
   $$('#track-body tr.now-playing').forEach(tr => tr.classList.remove('now-playing'));
   if (!Player.currentTrack || !_isQueueView()) return;
-  const uri = Player.currentTrack.uri;
+  // Mark only the exact playing row by index — listening history can contain
+  // many duplicates of the same uri, so matching by uri alone bolds them all.
+  const playIdx = Player.currentIdx;
+  if (playIdx == null || playIdx < 0) return;
   $$('#track-body tr[data-idx]').forEach(tr => {
-    const idx = parseInt(tr.dataset.idx);
-    const t = S.filtered[idx];
-    if (t && t.uri === uri) tr.classList.add('now-playing');
+    if (parseInt(tr.dataset.idx) === playIdx) tr.classList.add('now-playing');
   });
 }
 
@@ -1136,6 +1154,15 @@ function _initAudioEvents() {
       const cur = fmtDur(a.currentTime * 1000);
       const tot = trackDur > 0 ? fmtDur(trackDur * 1000) : fmtDur(Player.currentTrack.duration_ms || 0);
       $('#lcd-subtitle').textContent = cur + ' / ' + tot + ' \u2014 ' + normArtist(Player.currentTrack.artist);
+    }
+    if (trackDur > 0 && 'mediaSession' in navigator && navigator.mediaSession.setPositionState) {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: trackDur,
+          position: Math.min(a.currentTime, trackDur),
+          playbackRate: a.playbackRate || 1,
+        });
+      } catch(e) {}
     }
   });
   a.addEventListener('ended', _autoNext);
@@ -1293,7 +1320,7 @@ async function initSidebar() {
     '<span class="sb-count">' + (p.count||'') + '</span></div>'
   ).join('');
   // LCD
-  $('#lcd-title').textContent = '\u266B ByeByeSpotify';
+  $('#lcd-title').textContent = '\u266B VibeShelf';
   $('#lcd-subtitle').textContent = S.sidebar.user + ' \u2014 ' + (S.sidebar.all_count || (S.sidebar.saved_count||0)) + ' songs';
   // Browser
   populateBrowser();
@@ -1503,7 +1530,7 @@ function renderVisibleRows() {
   for (let i = start; i < end; i++) {
     const t = S.filtered[i];
     const tr = document.createElement('tr');
-    const isNowPlaying = _isQueueView() && Player.currentTrack && t.uri === Player.currentTrack.uri;
+    const isNowPlaying = _isQueueView() && Player.currentTrack && i === Player.currentIdx;
     tr.className = (i % 2 === 0 ? 'row-even' : 'row-odd') + (i === S.selectedIdx ? ' selected' : '') + (isNowPlaying ? ' now-playing' : '');
     tr.dataset.idx = i;
     tr.onclick = function() { selectRow(parseInt(this.dataset.idx)); };
@@ -1554,7 +1581,7 @@ function updateLCD(t) {
     }
   } else {
     const label = S.view === 'all' ? 'All Music' : S.view === 'saved' ? 'Spotify' : S.view === 'recent' ? 'Listening History' :
-      S.view.startsWith('top_') ? 'Top Tracks' : S.view.startsWith('playlist:') ? (S.filtered[0]?.source_name || 'Playlist') : 'ByeByeSpotify';
+      S.view.startsWith('top_') ? 'Top Tracks' : S.view.startsWith('playlist:') ? (S.filtered[0]?.source_name || 'Playlist') : 'VibeShelf';
     $('#lcd-title').textContent = label;
     $('#lcd-subtitle').textContent = S.filtered.length + ' songs';
   }
@@ -1567,6 +1594,40 @@ function updateArt(t) {
   } else {
     el.innerHTML = '<div class="placeholder">&#9835;</div>';
   }
+}
+
+function updateMediaSession(t) {
+  if (!('mediaSession' in navigator)) return;
+  if (!t) { try { navigator.mediaSession.metadata = null; } catch(e) {} return; }
+  const art = t.image ? artUrl(t.image) : '';
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title:  t.name  || '',
+      artist: normArtist(t.artist) || '',
+      album:  t.album || '',
+      artwork: art ? [
+        { src: art, sizes: '96x96',   type: 'image/jpeg' },
+        { src: art, sizes: '256x256', type: 'image/jpeg' },
+        { src: art, sizes: '512x512', type: 'image/jpeg' },
+      ] : [],
+    });
+  } catch(e) {}
+}
+
+function bindMediaSessionActions() {
+  if (!('mediaSession' in navigator)) return;
+  const ms = navigator.mediaSession;
+  try {
+    ms.setActionHandler('play',          () => ctrlPlay());
+    ms.setActionHandler('pause',         () => ctrlPlay());
+    ms.setActionHandler('nexttrack',     () => ctrlNext());
+    ms.setActionHandler('previoustrack', () => ctrlPrev());
+    ms.setActionHandler('seekto', (d) => {
+      if (Player.mode === 'navidrome' && Player.audio && d.seekTime != null) {
+        Player.audio.currentTime = d.seekTime;
+      }
+    });
+  } catch(e) {}
 }
 
 function updateStatusBar() {
@@ -2069,6 +2130,7 @@ function setupMobileTable() {
 async function init() {
   Player.audio = $('#nd-audio');
   _initAudioEvents();
+  bindMediaSessionActions();
   _initControlIcons();
   setupMobileTable();
   await initSidebar();
