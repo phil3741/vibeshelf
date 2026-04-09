@@ -108,6 +108,7 @@ body {
 #lcd-bar-fill { height: 100%; width: 0%; background: #7A9A5A; border-radius: 2px; transition: width 0.15s linear; }
 #nd-audio { display: none; }
 tr.now-playing td { font-weight: bold; }
+tr.track-unavailable td { opacity: 0.45; }
 .ctrl-btn.is-playing { color: #1DB954 !important; }
 .ctrl-btn.repeat-active { opacity: 1 !important; color: #2565C1 !important; }
 .ctrl-btn.shuffle-active { opacity: 1 !important; color: #2565C1 !important; }
@@ -815,6 +816,9 @@ const Player = {
   repeat: 'off',      // 'off' | 'all' | 'one'
   shuffle: false,
   _originalQueue: [],
+  unavailable: new Set(),
+  _unavailableStreak: 0,
+  _suppressAutoNextUntil: 0,
 };
 
 const _isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -888,6 +892,9 @@ async function _ensureSpotifyConnected() {
       if (!state) return;
       Player.playing = !state.paused;
       _updatePlayBtn();
+      if (Date.now() < Player._suppressAutoNextUntil) return;
+      const sdkUri = state.track_window?.current_track?.uri;
+      if (sdkUri && Player.currentTrack?.uri && sdkUri !== Player.currentTrack.uri) return;
       if (state.paused && state.position === 0 && state.track_window?.previous_tracks?.length > 0) {
         _autoNext();
       }
@@ -908,6 +915,9 @@ function _trackPlatform(t) {
 
 async function playTrack(track, idx, fromQueue) {
   if (!track) return;
+  if (track.id != null && Player.unavailable.has(track.id)) {
+    if (fromQueue) { _autoNext(); return; }
+  }
   // Stop current playback
   if (Player.mode === 'navidrome' && Player.audio) { Player.audio.pause(); }
   if (Player.mode === 'spotify' && Player.spotifyPlayer) {
@@ -983,8 +993,16 @@ async function playTrack(track, idx, fromQueue) {
               const body = await resp.text();
               console.error('Spotify play failed', resp.status, body, 'uri=', track.uri);
               $('#lcd-title').textContent = 'Playback failed (' + resp.status + ')';
+              if (resp.status === 403 || resp.status === 404) {
+                if (track.id != null) Player.unavailable.add(track.id);
+                renderVisibleRows();
+                Player._unavailableStreak = (Player._unavailableStreak || 0) + 1;
+                if (Player._unavailableStreak <= 5) _autoNext();
+              }
             } else {
               Player.playing = true;
+              Player._unavailableStreak = 0;
+              Player._suppressAutoNextUntil = Date.now() + 1500;
               _updatePlayBtn();
             }
           } catch(e) {
@@ -1011,13 +1029,17 @@ function _autoNext() {
     return;
   }
 
-  const next = Player.queueIdx + 1;
+  let next = Player.queueIdx + 1;
+  while (next < len && q[next] && q[next].id != null && Player.unavailable.has(q[next].id)) next++;
   if (next < len) {
     Player.queueIdx = next;
     playTrack(q[next], next, true);
   } else if (Player.repeat === 'all') {
-    Player.queueIdx = 0;
-    playTrack(q[0], 0, true);
+    let i = 0;
+    while (i < len && q[i] && q[i].id != null && Player.unavailable.has(q[i].id)) i++;
+    if (i >= len) { Player.playing = false; _updatePlayBtn(); return; }
+    Player.queueIdx = i;
+    playTrack(q[i], i, true);
   } else {
     Player.playing = false;
     _updatePlayBtn();
@@ -1089,9 +1111,15 @@ function ctrlShuffle() {
 function _shuffleRemaining() {
   const start = Player.queueIdx + 1;
   const q = Player.queue;
+  if (start >= q.length) return;
   for (let i = q.length - 1; i > start; i--) {
     const j = start + Math.floor(Math.random() * (i - start + 1));
     [q[i], q[j]] = [q[j], q[i]];
+  }
+  // Ensure the immediate next track isn't always the original one
+  if (q.length - start > 1) {
+    const swapWith = start + 1 + Math.floor(Math.random() * (q.length - start - 1));
+    [q[start + 1], q[swapWith]] = [q[swapWith], q[start + 1]];
   }
 }
 
@@ -1130,13 +1158,14 @@ function _isQueueView() {
 
 function _markNowPlaying() {
   $$('#track-body tr.now-playing').forEach(tr => tr.classList.remove('now-playing'));
-  if (!Player.currentTrack || !_isQueueView()) return;
-  // Mark only the exact playing row by index — listening history can contain
-  // many duplicates of the same uri, so matching by uri alone bolds them all.
-  const playIdx = Player.currentIdx;
-  if (playIdx == null || playIdx < 0) return;
+  if (!Player.currentTrack) return;
+  const curId = Player.currentTrack.id;
+  const curUri = Player.currentTrack.uri;
   $$('#track-body tr[data-idx]').forEach(tr => {
-    if (parseInt(tr.dataset.idx) === playIdx) tr.classList.add('now-playing');
+    const t = S.filtered[parseInt(tr.dataset.idx)];
+    if (t && ((curId != null && t.id === curId) || (curUri && t.uri === curUri))) {
+      tr.classList.add('now-playing');
+    }
   });
 }
 
@@ -1530,8 +1559,9 @@ function renderVisibleRows() {
   for (let i = start; i < end; i++) {
     const t = S.filtered[i];
     const tr = document.createElement('tr');
-    const isNowPlaying = _isQueueView() && Player.currentTrack && i === Player.currentIdx;
-    tr.className = (i % 2 === 0 ? 'row-even' : 'row-odd') + (i === S.selectedIdx ? ' selected' : '') + (isNowPlaying ? ' now-playing' : '');
+    const isNowPlaying = !!(Player.currentTrack && ((t.id != null && t.id === Player.currentTrack.id) || (t.uri && t.uri === Player.currentTrack.uri)));
+    const isUnavail = t && t.id != null && Player.unavailable.has(t.id);
+    tr.className = (i % 2 === 0 ? 'row-even' : 'row-odd') + (i === S.selectedIdx ? ' selected' : '') + (isNowPlaying ? ' now-playing' : '') + (isUnavail ? ' track-unavailable' : '');
     tr.dataset.idx = i;
     tr.onclick = function() { selectRow(parseInt(this.dataset.idx)); };
     tr.ondblclick = function() { const idx = parseInt(this.dataset.idx); const tk = S.filtered[idx]; if (tk) playTrack(tk, idx); };
